@@ -1,0 +1,21 @@
+# Python / Environment
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.env
+
+# Model weights & large datasets
+*.h5
+*.keras
+*.hdf5
+*.onnx
+data/
+datasets/
+models/
+
+# IDE / System files
+.vscode/
+.idea/
+.DS_Store
