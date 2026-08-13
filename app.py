@@ -1,13 +1,21 @@
 import os
 import sys
 import time
+import logging
 import av
 import cv2
 import numpy as np
 import streamlit as st
 
+# Suppress harmless background socket shutdown warnings from aioice / asyncio
+logging.getLogger("aioice").setLevel(logging.ERROR)
+logging.getLogger("asyncio").setLevel(logging.ERROR)
+
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
+import aiortc
+import aioice
+import streamlit_webrtc
 from streamlit_webrtc import WebRtcMode, webrtc_streamer
 
 from models.gradcam import generate_gradcam
@@ -61,6 +69,13 @@ initialize_session()
 
 # 2. BRAND HEADERS
 st.title("Beyond Words: A Sign Language Recognition System")
+
+with st.expander("🛠️ Environment Diagnostics (Debug Info)"):
+    st.write(f"**Streamlit Version:** `{st.__version__}`")
+    st.write(f"**Streamlit WebRTC:** `{streamlit_webrtc.__version__}`")
+    st.write(f"**aiortc Version:** `{aiortc.__version__}`")
+    st.write(f"**aioice Version:** `{aioice.__version__}`")
+
 st.html('<span class="subtitle-text" style="font-style: italic !important;">Decoding Signs, Empowering Lives</span>')
 
 if "gesture_history" not in st.session_state:
@@ -114,7 +129,7 @@ with st.container(border=True):
     with col_ctrl3:
         st.html("""<div style="margin-top: 25px;"></div>""")
         if st.session_state.get("saved_prediction") is not None:
-            if st.button("🔄 Test Another Sign", width='stretch', key="AnotherSignBtn", type="secondary"):
+            if st.button("🔄 Test Another Sign", use_container_width=True, key="AnotherSignBtn", type="secondary"):
                 st.session_state.saved_full_view = None
                 st.session_state.saved_hand_crop = None
                 st.session_state.saved_prediction = None
@@ -171,7 +186,7 @@ with col1:
             )
         else:
             if st.session_state.get("saved_full_view") is not None:
-                st.image(st.session_state.saved_full_view, caption="Captured Frame", width='stretch')
+                st.image(st.session_state.saved_full_view, caption="Captured Frame", use_container_width=True)
 
         st.html('</div>')
         st.markdown("<div style='margin-top: 14px;'></div>", unsafe_allow_html=True)
@@ -181,7 +196,7 @@ with col1:
                 "📸 CAPTURE HAND GESTURE", 
                 type="primary", 
                 disabled=not system_online, 
-                width='stretch',
+                use_container_width=True,
                 key="shutter_action_trigger"
             )
         else:
@@ -248,9 +263,9 @@ with col2:
             res = st.session_state.saved_prediction
             
             if st.session_state.get("saved_full_view") is not None:
-                full_output_view.image(st.session_state.saved_full_view, caption="Captured Frame", width='stretch')
+                full_output_view.image(st.session_state.saved_full_view, caption="Captured Frame", use_container_width=True)
             if st.session_state.get("saved_hand_crop") is not None:
-                crop_output_view.image(st.session_state.saved_hand_crop, caption="Grad-CAM Focus", width='stretch')
+                crop_output_view.image(st.session_state.saved_hand_crop, caption="Grad-CAM Focus", use_container_width=True)
 
             with metrics_slot:
                 if res.get("low_light"):
@@ -340,7 +355,7 @@ with col2:
             
             with reset_slot:
                 st.markdown("<div style='margin-top: 14px;'></div>", unsafe_allow_html=True)
-                if st.button("🔄 Test Another Sign", width='stretch', key="AnotherSignBtn", type="secondary"):
+                if st.button("🔄 Test Another Sign", use_container_width=True, key="AnotherSignBtn", type="secondary"):
                     st.session_state.saved_full_view = None
                     st.session_state.saved_hand_crop = None
                     st.session_state.saved_prediction = None
