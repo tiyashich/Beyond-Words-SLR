@@ -6,14 +6,17 @@ venv/
 env/
 .env
 
-# Model weights & large datasets
+# Model weights & heavy data
 *.h5
 *.keras
 *.hdf5
 *.onnx
+*.pt
+*.pth
+*.tflite
+*.pb
 data/
 datasets/
-models/
 
 # IDE / System files
 .vscode/
