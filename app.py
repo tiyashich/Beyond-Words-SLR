@@ -84,6 +84,28 @@ except Exception as e:
 
 initialize_session()
 
+# Helper to fetch dynamic WebRTC ICE configuration
+def get_ice_servers():
+    ice_servers = [
+        {"urls": ["stun:stun.l.google.com:19302"]},
+        {"urls": ["stun:stun1.l.google.com:19302"]},
+        {"urls": ["stun:stun2.l.google.com:19302"]},
+        {"urls": ["stun:stun3.l.google.com:19302"]},
+        {"urls": ["stun:stun4.l.google.com:19302"]},
+    ]
+    # Fetch TURN credentials dynamically via Twilio if secrets exist
+    if "TWILIO_ACCOUNT_SID" in st.secrets and "TWILIO_AUTH_TOKEN" in st.secrets:
+        try:
+            from twilio.rest import Client
+            account_sid = st.secrets["TWILIO_ACCOUNT_SID"]
+            auth_token = st.secrets["TWILIO_AUTH_TOKEN"]
+            client = Client(account_sid, auth_token)
+            token = client.tokens.create()
+            ice_servers = token.ice_servers
+        except Exception as err:
+            st.warning(f"Could not fetch dynamic TURN servers: {err}. Using default STUN servers.")
+    return ice_servers
+
 # 3. BRAND HEADERS
 st.title("Beyond Words: A Sign Language Recognition System")
 
@@ -109,7 +131,6 @@ def apply_digital_zoom(frame_bgr, zoom):
     cropped_center = frame_bgr[y1 : y1 + new_h, x1 : x1 + new_w]
     return cv2.resize(cropped_center, (w, h), interpolation=cv2.INTER_LINEAR)
 
-# Helper function to run detection pipeline on an image frame
 def process_frame_and_predict(frame_bgr):
     full_frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
     st.session_state.saved_full_view = full_frame_rgb
@@ -159,7 +180,8 @@ with st.container(border=True):
             label="Input Method Selection",
             options=[
                 "Live Webcam Stream",
-                "Upload Hand Sign Image File"
+                "Upload Hand Sign Image File",
+                "Native Snapshot (STUN/TURN Bypass)"
             ],
             label_visibility="collapsed"
         )
@@ -195,7 +217,6 @@ with col1:
         st.markdown('<div class="panel"><h3 class="panel-title">LIVE VIEWFINDER</h3>', unsafe_allow_html=True)
         st.html('<div class="viewfinder-wrapper">')
         
-        # Streamlit-WebRTC Callback to receive live video frames
         def video_frame_callback(frame: av.VideoFrame) -> av.VideoFrame:
             img = frame.to_ndarray(format="bgr24")
             if zoom_factor > 1.0:
@@ -204,31 +225,13 @@ with col1:
             st.session_state["webrtc_latest_frame"] = img.copy()
             return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-        # Display either Live Webcam or Image File Uploader
         if st.session_state.get("saved_prediction") is None:
             if input_mode == "Live Webcam Stream":
                 webrtc_streamer(
                     key="slr-live-stream",
                     mode=WebRtcMode.SENDRECV,
                     video_frame_callback=video_frame_callback,
-                    rtc_configuration={
-                        "iceServers": [
-                            {"urls": ["stun:stun.l.google.com:19302"]},
-                            {"urls": ["stun:stun1.l.google.com:19302"]},
-                            {"urls": ["stun:stun2.l.google.com:19302"]},
-                            {"urls": ["stun:stun3.l.google.com:19302"]},
-                            {"urls": ["stun:stun4.l.google.com:19302"]},
-                            {
-                                "urls": [
-                                    "turn:openrelay.metered.ca:80",
-                                    "turn:openrelay.metered.ca:443",
-                                    "turn:openrelay.metered.ca:443?transport=tcp"
-                                ],
-                                "username": "openrelay",
-                                "credential": "openrelay",
-                            },
-                        ]
-                    },
+                    rtc_configuration={"iceServers": get_ice_servers()},
                     media_stream_constraints={
                         "video": {
                             "width": {"ideal": 640},
@@ -238,11 +241,21 @@ with col1:
                         "audio": False
                     },
                 )
+            elif input_mode == "Native Snapshot (STUN/TURN Bypass)":
+                camera_file = st.camera_input("Take a photo of your sign language gesture")
+                if camera_file is not None:
+                    file_bytes = np.asarray(bytearray(camera_file.read()), dtype=np.uint8)
+                    uploaded_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+                    if zoom_factor > 1.0:
+                        uploaded_bgr = apply_digital_zoom(uploaded_bgr, zoom_factor)
+                    st.session_state["webrtc_latest_frame"] = uploaded_bgr
             else:
                 uploaded_file = st.file_uploader("Choose a hand sign image...", type=["jpg", "jpeg", "png"])
                 if uploaded_file is not None:
                     file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
                     uploaded_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+                    if zoom_factor > 1.0:
+                        uploaded_bgr = apply_digital_zoom(uploaded_bgr, zoom_factor)
                     st.session_state["webrtc_latest_frame"] = uploaded_bgr
                     st.image(cv2.cvtColor(uploaded_bgr, cv2.COLOR_BGR2RGB), caption="Uploaded Image Preview", use_container_width=True)
         else:
@@ -263,14 +276,13 @@ with col1:
         else:
             shutter_btn = False
 
-        # Execute prediction when Capture button is pressed
         if shutter_btn:
             if "webrtc_latest_frame" in st.session_state and st.session_state["webrtc_latest_frame"] is not None:
                 frame = st.session_state["webrtc_latest_frame"]
                 process_frame_and_predict(frame)
                 st.rerun()
             else:
-                st.warning("No image frame available. Please start the webcam stream or upload an image file above.")
+                st.warning("No image frame available. Please start the webcam stream or take a snapshot above.")
 
         st.markdown('</div>', unsafe_allow_html=True)
 
