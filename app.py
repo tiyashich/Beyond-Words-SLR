@@ -1,9 +1,13 @@
 import os
 import sys
 
-# 0. FORCE CPU MODE (Prevents CUDA segmentation faults on Streamlit Cloud containers)
-os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+# 0. CRITICAL CPU ISOLATION (MUST BE AT THE VERY TOP BEFORE ANY INHERITED IMPORTS)
+os.environ["CUDA_VISIBLE_DEVICES"] = ""
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "0"
+
+import torch
+torch.set_num_threads(1)  # Safeguard CPU memory allocations on cloud containers
 
 import time
 import logging
@@ -69,7 +73,8 @@ st.title("Beyond Words: A Sign Language Recognition System")
 
 with st.expander("🛠️ Environment Diagnostics (Debug Info)"):
     st.write(f"**Streamlit Version:** `{st.__version__}`")
-    st.write(f"**Live Engine:** `camera-input-live` (HTTPS/WebSocket Bridge)")
+    st.write(f"**PyTorch CPU Threads:** `{torch.get_num_threads()}`")
+    st.write(f"**Live Engine:** `camera-input-live` (WebSocket/HTTPS)")
 
 st.html('<span class="subtitle-text" style="font-style: italic !important;">Decoding Signs, Empowering Lives</span>')
 
