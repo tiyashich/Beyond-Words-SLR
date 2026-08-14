@@ -90,23 +90,34 @@ except Exception as e:
 
 initialize_session()
 
-# Helper to fetch dynamic WebRTC ICE configuration (STUN + HF/Cloudflare TURN + Twilio Fallback)
+# Helper to fetch dynamic WebRTC ICE configuration (STUN + Open Relay TURN + HF / Twilio Fallbacks)
 def get_ice_servers():
     """
-    Fetches ICE servers with cascading fallback logic:
-    1. Baseline Google Public STUN servers
-    2. Hugging Face / Cloudflare Realtime TURN Relay (Free 10GB/mo)
-    3. Twilio TURN Relay (Secondary fallback)
+    Fetches WebRTC ICE servers with robust firewall bypass fallbacks:
+    1. Google Public STUN
+    2. Open Relay TURN (Metered CA) on Ports 80 & 443 (TCP/UDP)
+    3. Hugging Face / Cloudflare TURN Relay
+    4. Twilio TURN Relay
     """
     ice_servers = [
+        # Google Public STUN
         {"urls": ["stun:stun.l.google.com:19302"]},
         {"urls": ["stun:stun1.l.google.com:19302"]},
         {"urls": ["stun:stun2.l.google.com:19302"]},
-        {"urls": ["stun:stun3.l.google.com:19302"]},
-        {"urls": ["stun:stun4.l.google.com:19302"]},
+        
+        # Free Open Relay TURN (Metered) - Bypasses firewalls over HTTP/HTTPS/TCP
+        {
+            "urls": [
+                "turn:openrelay.metered.ca:80",
+                "turn:openrelay.metered.ca:443",
+                "turn:openrelay.metered.ca:443?transport=tcp"
+            ],
+            "username": "openrelayproject",
+            "credential": "openrelayproject"
+        }
     ]
 
-    # 1. Attempt Hugging Face / Cloudflare TURN Relay
+    # Attempt Hugging Face / Cloudflare TURN Relay if secret exists
     hf_token = st.secrets.get("HF_TOKEN") or os.getenv("HF_TOKEN")
     if hf_token:
         try:
@@ -121,10 +132,10 @@ def get_ice_servers():
                     ice_servers.extend(turn_data["iceServers"])
                 elif isinstance(turn_data, list):
                     ice_servers.extend(turn_data)
-        except Exception as err:
-            st.warning(f"Could not fetch Hugging Face TURN credentials: {err}.")
+        except Exception:
+            pass
 
-    # 2. Attempt Twilio TURN Relay (Secondary Fallback)
+    # Attempt Twilio TURN Relay if secrets exist
     twilio_sid = st.secrets.get("TWILIO_ACCOUNT_SID") or os.getenv("TWILIO_ACCOUNT_SID")
     twilio_auth = st.secrets.get("TWILIO_AUTH_TOKEN") or os.getenv("TWILIO_AUTH_TOKEN")
     if twilio_sid and twilio_auth:
@@ -133,8 +144,8 @@ def get_ice_servers():
             client = Client(twilio_sid, twilio_auth)
             token = client.tokens.create()
             ice_servers.extend(token.ice_servers)
-        except Exception as err:
-            st.warning(f"Could not fetch Twilio TURN credentials: {err}.")
+        except Exception:
+            pass
 
     return ice_servers
 
