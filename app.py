@@ -1,18 +1,24 @@
 import os
 import sys
 
-# 0. CRITICAL CPU ISOLATION (MUST BE AT THE VERY TOP BEFORE ANY INHERITED IMPORTS)
+# 1. CRITICAL: PREVENT OPENMP / THREAD COLLISION SEGFAULTS (MUST BE AT VERY TOP)
+os.environ["OMP_NUM_THREADS"] = "1"
+os.environ["MKL_NUM_THREADS"] = "1"
+os.environ["OPENBLAS_NUM_THREADS"] = "1"
+os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+os.environ["NUMEXPR_NUM_THREADS"] = "1"
 os.environ["CUDA_VISIBLE_DEVICES"] = ""
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
-os.environ["PYTORCH_ENABLE_MPS_FALLBACK"] = "0"
+
+import cv2
+cv2.setNumThreads(0)  # Disable OpenCV thread pool to prevent cloud container crashes
 
 import torch
-torch.set_num_threads(1)  # Safeguard CPU memory allocations on cloud containers
+torch.set_num_threads(1)  # Limit PyTorch CPU threads
 
 import time
 import logging
 import asyncio
-import cv2
 import numpy as np
 import streamlit as st
 from camera_input_live import camera_input_live
@@ -37,7 +43,7 @@ from utils.constants import (
 from utils.image_utils import apply_clahe_tf, preprocess_cropped_image
 from utils.logo import get_base64_image
 
-# 1. PAGE SETUP & STRUCTURAL CSS INJECTION
+# 2. PAGE SETUP & STRUCTURAL CSS INJECTION
 st.set_page_config(layout="wide", page_title="Beyond Words | BDSL49")
 st.html(custom_css)
 
@@ -68,13 +74,12 @@ except Exception as e:
 
 initialize_session()
 
-# 2. BRAND HEADERS
+# 3. BRAND HEADERS
 st.title("Beyond Words: A Sign Language Recognition System")
 
 with st.expander("🛠️ Environment Diagnostics (Debug Info)"):
     st.write(f"**Streamlit Version:** `{st.__version__}`")
-    st.write(f"**PyTorch CPU Threads:** `{torch.get_num_threads()}`")
-    st.write(f"**Live Engine:** `camera-input-live` (WebSocket/HTTPS)")
+    st.write(f"**Live Engine:** `camera-input-live` (HTTPS / WebSocket Bridge)")
 
 st.html('<span class="subtitle-text" style="font-style: italic !important;">Decoding Signs, Empowering Lives</span>')
 
@@ -127,7 +132,7 @@ def process_frame_and_predict(frame_bgr):
             }
             st.session_state.saved_hand_crop = explanation_map
 
-# 3. CONTROL MATRIX PANEL
+# 4. CONTROL MATRIX PANEL
 with st.container(border=True):
     st.html('<div class="control-matrix-marker"></div>')
     col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([1.2, 1.0, 0.8], gap="medium") 
@@ -171,18 +176,19 @@ with st.container(border=True):
                 st.session_state.saved_prediction = None
                 st.rerun()
 
-# 4. MAIN LIVE VIEWPORT WORKSPACE
+# 5. MAIN LIVE VIEWPORT WORKSPACE
 col1, col2 = st.columns([1.35, 0.65], gap="large")
 with col1:
     with st.container(key="viewfinder_panel"):
         st.markdown('<div class="panel"><h3 class="panel-title">LIVE VIEWFINDER</h3>', unsafe_allow_html=True)
-        st.html('<div class="viewfinder-wrapper">')
-
+        
+        # Display Active Stream or Captured Result
         if st.session_state.get("saved_prediction") is None:
             if input_mode == "Live Webcam Stream":
+                st.caption("📷 Grant camera permission in your browser if prompted.")
                 image_data = camera_input_live(
                     debounce=1000, 
-                    show_controls=False,
+                    show_controls=True,
                     key="slr-camera-live"
                 )
                 if image_data:
@@ -213,7 +219,6 @@ with col1:
             if st.session_state.get("saved_full_view") is not None:
                 st.image(st.session_state.saved_full_view, caption="Captured Frame", use_container_width=True)
 
-        st.html('</div>')
         st.markdown("<div style='margin-top: 14px;'></div>", unsafe_allow_html=True)
         
         if st.session_state.get("saved_prediction") is None:
@@ -233,11 +238,11 @@ with col1:
                 process_frame_and_predict(frame)
                 st.rerun()
             else:
-                st.warning("No image frame available. Please allow camera access above.")
+                st.warning("No image frame captured yet. Please allow camera access or wait a second for the stream to initialize.")
 
         st.markdown('</div>', unsafe_allow_html=True)
 
-# 5. DIAGNOSTICS & RESULTS PANEL
+# 6. DIAGNOSTICS & RESULTS PANEL
 with col2:
     with st.container(key="diagnostics_panel"):
         st.markdown('<div class="panel diagnostics-panel"><h3 class="panel-title">AI DIAGNOSTICS & RESULTS</h3>', unsafe_allow_html=True)     
