@@ -1,5 +1,10 @@
 import os
 import sys
+
+# 0. FORCE CPU MODE (Prevents CUDA segmentation faults on Streamlit Cloud containers)
+os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
+
 import time
 import logging
 import asyncio
@@ -85,15 +90,15 @@ except Exception as e:
 
 initialize_session()
 
-# Helper to fetch dynamic WebRTC ICE configuration (HF/Cloudflare -> Twilio -> Base Google STUN)
+# Helper to fetch dynamic WebRTC ICE configuration (STUN + HF/Cloudflare TURN + Twilio Fallback)
 def get_ice_servers():
     """
     Fetches ICE servers with cascading fallback logic:
-    1. Hugging Face / Cloudflare Realtime TURN (Free 10GB/mo relay)
-    2. Twilio TURN Relay (Secondary fallback)
-    3. Google Public STUN (Default base configuration)
+    1. Baseline Google Public STUN servers
+    2. Hugging Face / Cloudflare Realtime TURN Relay (Free 10GB/mo)
+    3. Twilio TURN Relay (Secondary fallback)
     """
-    default_stun = [
+    ice_servers = [
         {"urls": ["stun:stun.l.google.com:19302"]},
         {"urls": ["stun:stun1.l.google.com:19302"]},
         {"urls": ["stun:stun2.l.google.com:19302"]},
@@ -101,7 +106,7 @@ def get_ice_servers():
         {"urls": ["stun:stun4.l.google.com:19302"]},
     ]
 
-    # 1. Primary Option: Hugging Face / Cloudflare TURN Relay
+    # 1. Attempt Hugging Face / Cloudflare TURN Relay
     hf_token = st.secrets.get("HF_TOKEN") or os.getenv("HF_TOKEN")
     if hf_token:
         try:
@@ -113,13 +118,13 @@ def get_ice_servers():
             if response.status_code == 200:
                 turn_data = response.json()
                 if "iceServers" in turn_data:
-                    return turn_data["iceServers"]
+                    ice_servers.extend(turn_data["iceServers"])
                 elif isinstance(turn_data, list):
-                    return turn_data
+                    ice_servers.extend(turn_data)
         except Exception as err:
-            st.warning(f"Could not fetch Hugging Face TURN credentials: {err}. Trying secondary fallback...")
+            st.warning(f"Could not fetch Hugging Face TURN credentials: {err}.")
 
-    # 2. Secondary Option: Twilio TURN Relay
+    # 2. Attempt Twilio TURN Relay (Secondary Fallback)
     twilio_sid = st.secrets.get("TWILIO_ACCOUNT_SID") or os.getenv("TWILIO_ACCOUNT_SID")
     twilio_auth = st.secrets.get("TWILIO_AUTH_TOKEN") or os.getenv("TWILIO_AUTH_TOKEN")
     if twilio_sid and twilio_auth:
@@ -127,12 +132,11 @@ def get_ice_servers():
             from twilio.rest import Client
             client = Client(twilio_sid, twilio_auth)
             token = client.tokens.create()
-            return token.ice_servers
+            ice_servers.extend(token.ice_servers)
         except Exception as err:
-            st.warning(f"Could not fetch Twilio TURN credentials: {err}. Falling back to default STUN.")
+            st.warning(f"Could not fetch Twilio TURN credentials: {err}.")
 
-    # 3. Final Fallback: Base Google STUN
-    return default_stun
+    return ice_servers
 
 # 3. BRAND HEADERS
 st.title("Beyond Words: A Sign Language Recognition System")
@@ -262,9 +266,9 @@ with col1:
                     rtc_configuration={"iceServers": get_ice_servers()},
                     media_stream_constraints={
                         "video": {
-                            "width": {"ideal": 640},
-                            "height": {"ideal": 360},
-                            "frameRate": {"ideal": 30}
+                            "width": {"ideal": 640, "max": 640},
+                            "height": {"ideal": 360, "max": 360},
+                            "frameRate": {"ideal": 15, "max": 30}
                         },
                         "audio": False
                     },
