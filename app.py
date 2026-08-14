@@ -8,38 +8,12 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 import time
 import logging
 import asyncio
-import requests
-import av
 import cv2
 import numpy as np
 import streamlit as st
-
-# 1. SUPPRESS UNHANDLED AIOICE / ASYNCIO BACKGROUND LOG NOISE
-logging.getLogger("aioice").setLevel(logging.CRITICAL)
-logging.getLogger("aiortc").setLevel(logging.CRITICAL)
-logging.getLogger("asyncio").setLevel(logging.CRITICAL)
-
-def silence_aioice_exceptions(loop, context):
-    exception = context.get("exception")
-    message = context.get("message", "")
-    if isinstance(exception, AttributeError) and "sendto" in str(exception):
-        return
-    if "Transaction.__retry" in message or "aioice" in str(context):
-        return
-    loop.default_exception_handler(context)
-
-try:
-    loop = asyncio.get_event_loop()
-    loop.set_exception_handler(silence_aioice_exceptions)
-except Exception:
-    pass
+from camera_input_live import camera_input_live
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
-import aiortc
-import aioice
-import streamlit_webrtc
-from streamlit_webrtc import WebRtcMode, webrtc_streamer
 
 from models.gradcam import generate_gradcam
 from models.loader import load_recognition_pipeline, load_yolo_detector
@@ -59,7 +33,7 @@ from utils.constants import (
 from utils.image_utils import apply_clahe_tf, preprocess_cropped_image
 from utils.logo import get_base64_image
 
-# 2. PAGE SETUP & STRUCTURAL CSS INJECTION
+# 1. PAGE SETUP & STRUCTURAL CSS INJECTION
 st.set_page_config(layout="wide", page_title="Beyond Words | BDSL49")
 st.html(custom_css)
 
@@ -90,73 +64,12 @@ except Exception as e:
 
 initialize_session()
 
-# Helper to fetch dynamic WebRTC ICE configuration (STUN + Open Relay TURN + HF / Twilio Fallbacks)
-def get_ice_servers():
-    """
-    Fetches WebRTC ICE servers with robust firewall bypass fallbacks:
-    1. Google Public STUN
-    2. Open Relay TURN (Metered CA) on Ports 80 & 443 (TCP/UDP)
-    3. Hugging Face / Cloudflare TURN Relay
-    4. Twilio TURN Relay
-    """
-    ice_servers = [
-        # Google Public STUN
-        {"urls": ["stun:stun.l.google.com:19302"]},
-        {"urls": ["stun:stun1.l.google.com:19302"]},
-        {"urls": ["stun:stun2.l.google.com:19302"]},
-        
-        # Free Open Relay TURN (Metered) - Bypasses firewalls over HTTP/HTTPS/TCP
-        {
-            "urls": [
-                "turn:openrelay.metered.ca:80",
-                "turn:openrelay.metered.ca:443",
-                "turn:openrelay.metered.ca:443?transport=tcp"
-            ],
-            "username": "openrelayproject",
-            "credential": "openrelayproject"
-        }
-    ]
-
-    # Attempt Hugging Face / Cloudflare TURN Relay if secret exists
-    hf_token = st.secrets.get("HF_TOKEN") or os.getenv("HF_TOKEN")
-    if hf_token:
-        try:
-            response = requests.get(
-                "https://huggingface.co/api/turn",
-                headers={"Authorization": f"Bearer {hf_token}"},
-                timeout=3.0,
-            )
-            if response.status_code == 200:
-                turn_data = response.json()
-                if "iceServers" in turn_data:
-                    ice_servers.extend(turn_data["iceServers"])
-                elif isinstance(turn_data, list):
-                    ice_servers.extend(turn_data)
-        except Exception:
-            pass
-
-    # Attempt Twilio TURN Relay if secrets exist
-    twilio_sid = st.secrets.get("TWILIO_ACCOUNT_SID") or os.getenv("TWILIO_ACCOUNT_SID")
-    twilio_auth = st.secrets.get("TWILIO_AUTH_TOKEN") or os.getenv("TWILIO_AUTH_TOKEN")
-    if twilio_sid and twilio_auth:
-        try:
-            from twilio.rest import Client
-            client = Client(twilio_sid, twilio_auth)
-            token = client.tokens.create()
-            ice_servers.extend(token.ice_servers)
-        except Exception:
-            pass
-
-    return ice_servers
-
-# 3. BRAND HEADERS
+# 2. BRAND HEADERS
 st.title("Beyond Words: A Sign Language Recognition System")
 
 with st.expander("🛠️ Environment Diagnostics (Debug Info)"):
     st.write(f"**Streamlit Version:** `{st.__version__}`")
-    st.write(f"**Streamlit WebRTC:** `{streamlit_webrtc.__version__}`")
-    st.write(f"**aiortc Version:** `{aiortc.__version__}`")
-    st.write(f"**aioice Version:** `{aioice.__version__}`")
+    st.write(f"**Live Engine:** `camera-input-live` (HTTPS/WebSocket Bridge)")
 
 st.html('<span class="subtitle-text" style="font-style: italic !important;">Decoding Signs, Empowering Lives</span>')
 
@@ -209,7 +122,7 @@ def process_frame_and_predict(frame_bgr):
             }
             st.session_state.saved_hand_crop = explanation_map
 
-# 4. CONTROL MATRIX PANEL
+# 3. CONTROL MATRIX PANEL
 with st.container(border=True):
     st.html('<div class="control-matrix-marker"></div>')
     col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([1.2, 1.0, 0.8], gap="medium") 
@@ -223,8 +136,8 @@ with st.container(border=True):
             label="Input Method Selection",
             options=[
                 "Live Webcam Stream",
-                "Upload Hand Sign Image File",
-                "Native Snapshot (STUN/TURN Bypass)"
+                "Native Snapshot (STUN/TURN Bypass)",
+                "Upload Hand Sign Image File"
             ],
             label_visibility="collapsed"
         )
@@ -253,37 +166,27 @@ with st.container(border=True):
                 st.session_state.saved_prediction = None
                 st.rerun()
 
-# 5. MAIN LIVE VIEWPORT WORKSPACE
+# 4. MAIN LIVE VIEWPORT WORKSPACE
 col1, col2 = st.columns([1.35, 0.65], gap="large")
 with col1:
     with st.container(key="viewfinder_panel"):
         st.markdown('<div class="panel"><h3 class="panel-title">LIVE VIEWFINDER</h3>', unsafe_allow_html=True)
         st.html('<div class="viewfinder-wrapper">')
-        
-        def video_frame_callback(frame: av.VideoFrame) -> av.VideoFrame:
-            img = frame.to_ndarray(format="bgr24")
-            if zoom_factor > 1.0:
-                img = apply_digital_zoom(img, zoom_factor)
-            
-            st.session_state["webrtc_latest_frame"] = img.copy()
-            return av.VideoFrame.from_ndarray(img, format="bgr24")
 
         if st.session_state.get("saved_prediction") is None:
             if input_mode == "Live Webcam Stream":
-                webrtc_streamer(
-                    key="slr-live-stream",
-                    mode=WebRtcMode.SENDRECV,
-                    video_frame_callback=video_frame_callback,
-                    rtc_configuration={"iceServers": get_ice_servers()},
-                    media_stream_constraints={
-                        "video": {
-                            "width": {"ideal": 640, "max": 640},
-                            "height": {"ideal": 360, "max": 360},
-                            "frameRate": {"ideal": 15, "max": 30}
-                        },
-                        "audio": False
-                    },
+                image_data = camera_input_live(
+                    debounce=1000, 
+                    show_controls=False,
+                    key="slr-camera-live"
                 )
+                if image_data:
+                    file_bytes = np.asarray(bytearray(image_data.read()), dtype=np.uint8)
+                    live_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+                    if zoom_factor > 1.0:
+                        live_bgr = apply_digital_zoom(live_bgr, zoom_factor)
+                    st.session_state["webrtc_latest_frame"] = live_bgr
+
             elif input_mode == "Native Snapshot (STUN/TURN Bypass)":
                 camera_file = st.camera_input("Take a photo of your sign language gesture")
                 if camera_file is not None:
@@ -325,11 +228,11 @@ with col1:
                 process_frame_and_predict(frame)
                 st.rerun()
             else:
-                st.warning("No image frame available. Please start the webcam stream or take a snapshot above.")
+                st.warning("No image frame available. Please allow camera access above.")
 
         st.markdown('</div>', unsafe_allow_html=True)
 
-# 6. DIAGNOSTICS & RESULTS PANEL
+# 5. DIAGNOSTICS & RESULTS PANEL
 with col2:
     with st.container(key="diagnostics_panel"):
         st.markdown('<div class="panel diagnostics-panel"><h3 class="panel-title">AI DIAGNOSTICS & RESULTS</h3>', unsafe_allow_html=True)     
