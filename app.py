@@ -2,14 +2,31 @@ import os
 import sys
 import time
 import logging
+import asyncio
 import av
 import cv2
 import numpy as np
 import streamlit as st
 
-# Suppress harmless background socket shutdown warnings from aioice / asyncio
-logging.getLogger("aioice").setLevel(logging.ERROR)
-logging.getLogger("asyncio").setLevel(logging.ERROR)
+# 1. SUPPRESS UNHANDLED AIOICE / ASYNCIO BACKGROUND LOG NOISE
+logging.getLogger("aioice").setLevel(logging.CRITICAL)
+logging.getLogger("aiortc").setLevel(logging.CRITICAL)
+logging.getLogger("asyncio").setLevel(logging.CRITICAL)
+
+def silence_aioice_exceptions(loop, context):
+    exception = context.get("exception")
+    message = context.get("message", "")
+    if isinstance(exception, AttributeError) and "sendto" in str(exception):
+        return
+    if "Transaction.__retry" in message or "aioice" in str(context):
+        return
+    loop.default_exception_handler(context)
+
+try:
+    loop = asyncio.get_event_loop()
+    loop.set_exception_handler(silence_aioice_exceptions)
+except Exception:
+    pass
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -36,7 +53,7 @@ from utils.constants import (
 from utils.image_utils import apply_clahe_tf, preprocess_cropped_image
 from utils.logo import get_base64_image
 
-# 1. PAGE SETUP & STRUCTURAL CSS INJECTION
+# 2. PAGE SETUP & STRUCTURAL CSS INJECTION
 st.set_page_config(layout="wide", page_title="Beyond Words | BDSL49")
 st.html(custom_css)
 
@@ -67,7 +84,7 @@ except Exception as e:
 
 initialize_session()
 
-# 2. BRAND HEADERS
+# 3. BRAND HEADERS
 st.title("Beyond Words: A Sign Language Recognition System")
 
 with st.expander("🛠️ Environment Diagnostics (Debug Info)"):
@@ -92,21 +109,57 @@ def apply_digital_zoom(frame_bgr, zoom):
     cropped_center = frame_bgr[y1 : y1 + new_h, x1 : x1 + new_w]
     return cv2.resize(cropped_center, (w, h), interpolation=cv2.INTER_LINEAR)
 
-# 3. CONTROL MATRIX PANEL
+# Helper function to run detection pipeline on an image frame
+def process_frame_and_predict(frame_bgr):
+    full_frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+    st.session_state.saved_full_view = full_frame_rgb
+    
+    mean_luminance = float(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY).mean())
+    if mean_luminance < LUMINANCE_THRESHOLD:
+        st.session_state.saved_prediction = {
+            "low_light": True,
+            "luminance": mean_luminance,
+        }
+    else:
+        yolo_results = detector(frame_bgr, conf=0.40, verbose=False)[0]
+        if len(yolo_results.boxes) == 0:
+            st.session_state.saved_prediction = {
+                "no_hand": True,
+            }
+        else:
+            best_box = yolo_results.boxes[0].xyxy[0].cpu().numpy().astype(int)
+            x1, y1, x2, y2 = best_box
+            h_orig, w_orig = frame_bgr.shape[:2]
+            crop_bgr = frame_bgr[max(0, y1):min(h_orig, y2), max(0, x1):min(w_orig, x2)]
+            
+            bengali_char, best_class_name, score, threshold, top3, explanation_map = predict_crop(
+                crop_bgr, feature_extractor, backbone_grad_model, centroids, class_names, class_thresholds
+            )
+            top3_formatted = [(char, f"{sim * 100:.1f}%") for char, sim in top3]
+            st.session_state.saved_prediction = {
+                "char": bengali_char, 
+                "class_id": best_class_name,
+                "score": score, 
+                "threshold": threshold, 
+                "top3": top3_formatted
+            }
+            st.session_state.saved_hand_crop = explanation_map
+
+# 4. CONTROL MATRIX PANEL
 with st.container(border=True):
     st.html('<div class="control-matrix-marker"></div>')
     col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([1.2, 1.0, 0.8], gap="medium") 
     with col_ctrl1:
         st.html("""
         <div class="section-label">
-            <span>📹</span> Video Source
+            <span>📹</span> Input Method
         </div>
         """)
-        camera_choice = st.selectbox(
-            label="Video Device Source",
+        input_mode = st.selectbox(
+            label="Input Method Selection",
             options=[
-                "Integrated Device Camera (Built-in Webcam)",
-                "Iriun Virtual Webcam / External USB Camera"
+                "Live Webcam Stream",
+                "Upload Hand Sign Image File"
             ],
             label_visibility="collapsed"
         )
@@ -135,14 +188,12 @@ with st.container(border=True):
                 st.session_state.saved_prediction = None
                 st.rerun()
 
-# 4. MAIN LIVE VIEWPORT WORKSPACE
+# 5. MAIN LIVE VIEWPORT WORKSPACE
 col1, col2 = st.columns([1.35, 0.65], gap="large")
 with col1:
     with st.container(key="viewfinder_panel"):
         st.markdown('<div class="panel"><h3 class="panel-title">LIVE VIEWFINDER</h3>', unsafe_allow_html=True)
-        # Relative Wrapper Container for Floating Overlay Placement
         st.html('<div class="viewfinder-wrapper">')
-        countdown_banner = st.empty()
         
         # Streamlit-WebRTC Callback to receive live video frames
         def video_frame_callback(frame: av.VideoFrame) -> av.VideoFrame:
@@ -150,40 +201,50 @@ with col1:
             if zoom_factor > 1.0:
                 img = apply_digital_zoom(img, zoom_factor)
             
-            # Cache the latest frame so shutter trigger can grab it
             st.session_state["webrtc_latest_frame"] = img.copy()
             return av.VideoFrame.from_ndarray(img, format="bgr24")
 
-        # Show stream if no captured snapshot prediction exists yet
+        # Display either Live Webcam or Image File Uploader
         if st.session_state.get("saved_prediction") is None:
-            webrtc_streamer(
-                key="slr-live-stream",
-                mode=WebRtcMode.SENDRECV,
-                video_frame_callback=video_frame_callback,
-                rtc_configuration={
-                    "iceServers": [
-                        {"urls": ["stun:stun.l.google.com:19302", "stun:stun1.l.google.com:19302"]},
-                        {
-                            "urls": ["turn:openrelay.metered.ca:80", "turn:openrelay.metered.ca:443"],
-                            "username": "openrelay",
-                            "credential": "openrelay",
-                        },
-                        {
-                            "urls": ["turn:openrelay.metered.ca:443?transport=tcp"],
-                            "username": "openrelay",
-                            "credential": "openrelay",
-                        },
-                    ]
-                },
-                media_stream_constraints={
-                    "video": {
-                        "width": {"ideal": 640},
-                        "height": {"ideal": 360},
-                        "frameRate": {"ideal": 30}
+            if input_mode == "Live Webcam Stream":
+                webrtc_streamer(
+                    key="slr-live-stream",
+                    mode=WebRtcMode.SENDRECV,
+                    video_frame_callback=video_frame_callback,
+                    rtc_configuration={
+                        "iceServers": [
+                            {"urls": ["stun:stun.l.google.com:19302"]},
+                            {"urls": ["stun:stun1.l.google.com:19302"]},
+                            {"urls": ["stun:stun2.l.google.com:19302"]},
+                            {"urls": ["stun:stun3.l.google.com:19302"]},
+                            {"urls": ["stun:stun4.l.google.com:19302"]},
+                            {
+                                "urls": [
+                                    "turn:openrelay.metered.ca:80",
+                                    "turn:openrelay.metered.ca:443",
+                                    "turn:openrelay.metered.ca:443?transport=tcp"
+                                ],
+                                "username": "openrelay",
+                                "credential": "openrelay",
+                            },
+                        ]
                     },
-                    "audio": False
-                },
-            )
+                    media_stream_constraints={
+                        "video": {
+                            "width": {"ideal": 640},
+                            "height": {"ideal": 360},
+                            "frameRate": {"ideal": 30}
+                        },
+                        "audio": False
+                    },
+                )
+            else:
+                uploaded_file = st.file_uploader("Choose a hand sign image...", type=["jpg", "jpeg", "png"])
+                if uploaded_file is not None:
+                    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+                    uploaded_bgr = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
+                    st.session_state["webrtc_latest_frame"] = uploaded_bgr
+                    st.image(cv2.cvtColor(uploaded_bgr, cv2.COLOR_BGR2RGB), caption="Uploaded Image Preview", use_container_width=True)
         else:
             if st.session_state.get("saved_full_view") is not None:
                 st.image(st.session_state.saved_full_view, caption="Captured Frame", use_container_width=True)
@@ -206,45 +267,14 @@ with col1:
         if shutter_btn:
             if "webrtc_latest_frame" in st.session_state and st.session_state["webrtc_latest_frame"] is not None:
                 frame = st.session_state["webrtc_latest_frame"]
-                full_frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                st.session_state.saved_full_view = full_frame_rgb
-                
-                mean_luminance = float(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).mean())
-                if mean_luminance < LUMINANCE_THRESHOLD:
-                    st.session_state.saved_prediction = {
-                        "low_light": True,
-                        "luminance": mean_luminance,
-                    }
-                else:
-                    yolo_results = detector(frame, conf=0.40, verbose=False)[0]
-                    if len(yolo_results.boxes) == 0:
-                        st.session_state.saved_prediction = {
-                            "no_hand": True,
-                        }
-                    else:
-                        best_box = yolo_results.boxes[0].xyxy[0].cpu().numpy().astype(int)
-                        x1, y1, x2, y2 = best_box
-                        h_orig, w_orig = frame.shape[:2]
-                        crop_bgr = frame[max(0, y1):min(h_orig, y2), max(0, x1):min(w_orig, x2)]
-                        
-                        bengali_char, best_class_name, score, threshold, top3, explanation_map = predict_crop(
-                            crop_bgr, feature_extractor, backbone_grad_model, centroids, class_names, class_thresholds
-                        )
-                        top3_formatted = [(char, f"{sim * 100:.1f}%") for char, sim in top3]
-                        st.session_state.saved_prediction = {
-                            "char": bengali_char, 
-                            "class_id": best_class_name,
-                            "score": score, 
-                            "threshold": threshold, 
-                            "top3": top3_formatted
-                        }
-                        st.session_state.saved_hand_crop = explanation_map
+                process_frame_and_predict(frame)
                 st.rerun()
             else:
-                st.warning("Webcam stream loading... Please click 'Start' on the stream widget above.")
+                st.warning("No image frame available. Please start the webcam stream or upload an image file above.")
 
         st.markdown('</div>', unsafe_allow_html=True)
 
+# 6. DIAGNOSTICS & RESULTS PANEL
 with col2:
     with st.container(key="diagnostics_panel"):
         st.markdown('<div class="panel diagnostics-panel"><h3 class="panel-title">AI DIAGNOSTICS & RESULTS</h3>', unsafe_allow_html=True)     
