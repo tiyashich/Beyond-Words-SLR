@@ -3,6 +3,7 @@ import sys
 import time
 import logging
 import asyncio
+import requests
 import av
 import cv2
 import numpy as np
@@ -84,27 +85,54 @@ except Exception as e:
 
 initialize_session()
 
-# Helper to fetch dynamic WebRTC ICE configuration
+# Helper to fetch dynamic WebRTC ICE configuration (HF/Cloudflare -> Twilio -> Base Google STUN)
 def get_ice_servers():
-    ice_servers = [
+    """
+    Fetches ICE servers with cascading fallback logic:
+    1. Hugging Face / Cloudflare Realtime TURN (Free 10GB/mo relay)
+    2. Twilio TURN Relay (Secondary fallback)
+    3. Google Public STUN (Default base configuration)
+    """
+    default_stun = [
         {"urls": ["stun:stun.l.google.com:19302"]},
         {"urls": ["stun:stun1.l.google.com:19302"]},
         {"urls": ["stun:stun2.l.google.com:19302"]},
         {"urls": ["stun:stun3.l.google.com:19302"]},
         {"urls": ["stun:stun4.l.google.com:19302"]},
     ]
-    # Fetch TURN credentials dynamically via Twilio if secrets exist
-    if "TWILIO_ACCOUNT_SID" in st.secrets and "TWILIO_AUTH_TOKEN" in st.secrets:
+
+    # 1. Primary Option: Hugging Face / Cloudflare TURN Relay
+    hf_token = st.secrets.get("HF_TOKEN") or os.getenv("HF_TOKEN")
+    if hf_token:
+        try:
+            response = requests.get(
+                "https://huggingface.co/api/turn",
+                headers={"Authorization": f"Bearer {hf_token}"},
+                timeout=3.0,
+            )
+            if response.status_code == 200:
+                turn_data = response.json()
+                if "iceServers" in turn_data:
+                    return turn_data["iceServers"]
+                elif isinstance(turn_data, list):
+                    return turn_data
+        except Exception as err:
+            st.warning(f"Could not fetch Hugging Face TURN credentials: {err}. Trying secondary fallback...")
+
+    # 2. Secondary Option: Twilio TURN Relay
+    twilio_sid = st.secrets.get("TWILIO_ACCOUNT_SID") or os.getenv("TWILIO_ACCOUNT_SID")
+    twilio_auth = st.secrets.get("TWILIO_AUTH_TOKEN") or os.getenv("TWILIO_AUTH_TOKEN")
+    if twilio_sid and twilio_auth:
         try:
             from twilio.rest import Client
-            account_sid = st.secrets["TWILIO_ACCOUNT_SID"]
-            auth_token = st.secrets["TWILIO_AUTH_TOKEN"]
-            client = Client(account_sid, auth_token)
+            client = Client(twilio_sid, twilio_auth)
             token = client.tokens.create()
-            ice_servers = token.ice_servers
+            return token.ice_servers
         except Exception as err:
-            st.warning(f"Could not fetch dynamic TURN servers: {err}. Using default STUN servers.")
-    return ice_servers
+            st.warning(f"Could not fetch Twilio TURN credentials: {err}. Falling back to default STUN.")
+
+    # 3. Final Fallback: Base Google STUN
+    return default_stun
 
 # 3. BRAND HEADERS
 st.title("Beyond Words: A Sign Language Recognition System")
